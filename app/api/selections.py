@@ -13,7 +13,11 @@ from sqlalchemy.orm import Session
 from app.db.models import Node, NodeRevision, Selection, SelectionNode
 from app.db.session import get_db
 from app.queries import revision_for_node_at_version, version_id_for
-from app.schemas import SelectionNodeOut, SelectionOut, SelectionRequest
+from app.deps import get_llm, get_store
+from app.generation import generate_for_selection, generation_to_out
+from app.llm.client import LLMProvider
+from app.db.mongo import GenerationStore
+from app.schemas import GenerationOut, SelectionNodeOut, SelectionOut, SelectionRequest
 
 router = APIRouter(prefix="/selections", tags=["selections"])
 
@@ -102,3 +106,27 @@ def _to_out(db: Session, sel: Selection) -> SelectionOut:
         pinned_version=pinned_version,
         nodes=out_nodes,
     )
+
+
+@router.post("/{selection_id}/generate", response_model=GenerationOut)
+def generate(
+    selection_id: int,
+    db: Session = Depends(get_db),
+    llm: LLMProvider = Depends(get_llm),
+    store: GenerationStore = Depends(get_store),
+) -> GenerationOut:
+    try:
+        doc = generate_for_selection(db, selection_id, llm, store)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    if doc["parse_status"] == "failed":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "LLM output failed validation after one retry; not fabricated.",
+                "generation_id": doc["id"],
+                "parse_status": doc["parse_status"],
+                "validation_error": doc.get("validation_error"),
+            },
+        )
+    return GenerationOut(**generation_to_out(doc))

@@ -128,3 +128,5 @@ class SelectionNode(Base):
     )
 
     selection: Mapped["Selection"] = relationship(back_populates="items")
+    node: Mapped["Node"] = relationship(foreign_keys=[node_id])
+    node_revision: Mapped["NodeRevision"] = relationship(foreign_keys=[node_revision_id])
