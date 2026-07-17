@@ -31,3 +31,16 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setenv("CT200_JSON_STORE", str(tmp_path / "gens.json"))
     yield sess
     sess.close()
+
+
+@pytest.fixture
+def client(db):
+    """FastAPI TestClient wired to the isolated temp DB (db fixture)."""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.db.session import get_db
+
+    app.dependency_overrides[get_db] = lambda: db
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()

@@ -96,6 +96,8 @@ class NodeRevision(Base):
         Boolean, nullable=False, default=False
     )
 
+    node: Mapped["Node"] = relationship(foreign_keys=[node_id])
+
 
 class Selection(Base):
     __tablename__ = "selections"
