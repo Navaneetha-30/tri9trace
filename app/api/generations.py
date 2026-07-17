@@ -1,9 +1,8 @@
-"""Generations / retrieval API (FR5/FR7, TRD section 6).
+"""Generations / retrieval API (FR5/FR7, TRD section 6/8).
 
-Staleness flags are added to these responses in stage 8 (FR6/FR7). For now
-(stage 6) these return the stored generation docs verbatim; a failed
-generation is still inspectable here (TRD section 3: never swallow a failed
-response).
+Every generation returned carries a staleness flag computed at retrieval
+time (FR6) -- a correct staleness check that isn't queryable here doesn't
+count as done. Failed generations remain inspectable (never swallowed).
 """
 from __future__ import annotations
 
@@ -15,6 +14,7 @@ from app.db.session import get_db
 from app.deps import get_store
 from app.generation import generation_to_out
 from app.schemas import GenerationOut
+from app.versioning.staleness import compute_staleness
 
 router = APIRouter(tags=["generations"])
 
@@ -26,21 +26,37 @@ def _get_doc(store: GenerationStore, gen_id: str) -> dict:
     return doc
 
 
+def _with_staleness(db: Session, doc: dict) -> dict:
+    out = generation_to_out(doc)
+    st = compute_staleness(db, doc)
+    out["stale"] = st["stale"]
+    out["stale_nodes"] = st["stale_nodes"]
+    # Join per-node diff summaries into one short string for the response.
+    if st["stale_nodes"]:
+        parts = [f"node {nid}: {st['diff_summaries'][nid]}" for nid in st["stale_nodes"]]
+        out["diff_summary"] = " | ".join(parts)
+    else:
+        out["diff_summary"] = None
+    return out
+
+
 @router.get("/generations/{gen_id}", response_model=GenerationOut)
-def get_generation(gen_id: str, store: GenerationStore = Depends(get_store)) -> GenerationOut:
-    return GenerationOut(**generation_to_out(_get_doc(store, gen_id)))
+def get_generation(
+    gen_id: str,
+    db: Session = Depends(get_db),
+    store: GenerationStore = Depends(get_store),
+) -> GenerationOut:
+    return GenerationOut(**_with_staleness(db, _get_doc(store, gen_id)))
 
 
 @router.get("/generations", response_model=list[GenerationOut])
 def list_generations(
     selection_id: int | None = Query(None),
     node_id: int | None = Query(None),
+    db: Session = Depends(get_db),
     store: GenerationStore = Depends(get_store),
 ) -> list[GenerationOut]:
     if selection_id is None and node_id is None:
         raise HTTPException(status_code=400, detail="provide ?selection_id= or ?node_id=")
-    if selection_id is not None:
-        docs = store.list_by_selection(selection_id)
-    else:
-        docs = store.list_by_node(node_id)  # type: ignore[arg-type]
-    return [GenerationOut(**generation_to_out(d)) for d in docs]
+    docs = store.list_by_selection(selection_id) if selection_id is not None else store.list_by_node(node_id)
+    return [GenerationOut(**_with_staleness(db, d)) for d in docs]

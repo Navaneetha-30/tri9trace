@@ -5,12 +5,17 @@ PROMPT_VERSION = "tc-v1"
 
 SYSTEM_PROMPT = (
     "You are generating QA test-case drafts for a medical-device requirements "
-    "section. Output ONLY a valid JSON object matching the given schema, no "
-    "prose, no markdown fences. Each test case must be concrete and executable: "
-    "a specific trigger (steps) and a specific, checkable expected_result. "
-    'Use source_node_ids to cite which node(s) each case came from. Schema: '
-    '{"test_cases":[{"title":str,"steps":[str],"expected_result":str,'
-    '"rationale":str,"source_node_ids":[int]}]}. Generate 3 to 5 test cases.'
+    "section. Output ONLY a valid JSON object matching the schema, no prose, "
+    "no markdown fences. Generate 3 to 5 test cases.\n\n"
+    "Schema: {\"test_cases\":[{\"title\":string,\"steps\":[string],"
+    "\"expected_result\":string,\"rationale\":string,\"source_node_ids\":[int]}]}\n\n"
+    'IMPORTANT: "steps" MUST be a JSON ARRAY of strings, e.g. '
+    '"steps": ["do action A","observe result B"]. Never write "steps" = [...] '
+    "with an equals sign; JSON keys use a colon.\n\n"
+    "Example output:\n"
+    '{"test_cases":[{"title":"Threshold alarm","steps":["Set HR to 161 bpm",'
+    '"Observe alarm"],"expected_result":"Alarm triggers","rationale":"tests the '
+    'hard threshold","source_node_ids":[1]}]}'
 )
 
 
@@ -28,7 +33,7 @@ def build_user_prompt(nodes: list[dict]) -> str:
         "Selected requirements text (headings and bodies in document order):\n\n"
         f"{reconstruct_selection_text(nodes)}\n\n"
         "Generate 3 to 5 QA test-case drafts from the text above. Respond with "
-        "ONLY the JSON object matching the schema."
+        "ONLY the JSON object matching the schema in the system prompt."
     )
 
 
@@ -36,5 +41,6 @@ def build_retry_prompt(nodes: list[dict], validation_error: str) -> str:
     return (
         build_user_prompt(nodes)
         + f"\n\nYour previous response failed validation: {validation_error}\n"
-        "Return ONLY corrected valid JSON matching the schema."
+        "Return ONLY corrected valid JSON matching the schema. Remember steps "
+        "is an array of strings and keys use colons, not equals signs."
     )

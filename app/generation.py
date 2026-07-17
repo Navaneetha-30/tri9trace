@@ -9,6 +9,8 @@ would destroy a QA audit trail.
 """
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,6 +20,43 @@ from sqlalchemy.orm import Session
 from app.db.models import Selection
 from app.llm.prompts import PROMPT_VERSION, SYSTEM_PROMPT, build_retry_prompt, build_user_prompt
 from app.llm.schema import TestCaseList
+
+
+_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+
+def extract_json(raw: str) -> str:
+    """Strip markdown fences and any surrounding prose, returning the first
+    balanced {...} JSON object. Lets us tolerate models that wrap JSON in
+    fences or add a stray sentence, without fabricating content."""
+    if not raw:
+        return ""
+    s = _FENCE_RE.sub("", raw).strip()
+    start = s.find("{")
+    if start < 0:
+        return s
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(s)):
+        ch = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return s[start:]
 
 
 def _load_selection_nodes(db: Session, selection_id: int) -> tuple[Selection, list[dict]]:
@@ -42,6 +81,16 @@ def _load_selection_nodes(db: Session, selection_id: int) -> tuple[Selection, li
     return sel, nodes
 
 
+def _parse(raw: str) -> tuple[list[dict] | None, str | None]:
+    """Try to validate a raw LLM response. Returns (test_cases, error)."""
+    candidate = extract_json(raw)
+    try:
+        parsed = TestCaseList.model_validate_json(candidate)
+    except (ValidationError, ValueError) as exc:
+        return None, str(exc).splitlines()[0] or "validation failed"
+    return [tc.model_dump() for tc in parsed.test_cases], None
+
+
 def generate_for_selection(db: Session, selection_id: int, llm, store) -> dict[str, Any]:
     sel, nodes = _load_selection_nodes(db, selection_id)
 
@@ -57,19 +106,20 @@ def generate_for_selection(db: Session, selection_id: int, llm, store) -> dict[s
     validation_error = None
 
     for attempt in (1, 2):
-        raw = llm.complete(SYSTEM_PROMPT, user_prompt)
-        raw_attempts.append(raw)
         try:
-            parsed = TestCaseList.model_validate_json(raw)
-            test_cases = [tc.model_dump() for tc in parsed.test_cases]
+            raw = llm.complete(SYSTEM_PROMPT, user_prompt)
+        except Exception as exc:  # noqa: BLE001
+            # Provider-level failure (network/auth/etc): treat as malformed,
+            # store the error text for audit, and retry once.
+            raw = f"<provider error: {type(exc).__name__}: {exc}>"
+        raw_attempts.append(raw)
+        test_cases, validation_error = _parse(raw)
+        if test_cases is not None:
             parse_status = "ok" if attempt == 1 else "retried_ok"
             validation_error = None
             break
-        except ValidationError as exc:
-            validation_error = str(exc).splitlines()[0] or "validation failed"
-            retry_count = attempt
-            user_prompt = build_retry_prompt(nodes, validation_error)
-            continue
+        retry_count = attempt
+        user_prompt = build_retry_prompt(nodes, validation_error or "validation failed")
 
     if test_cases is None:
         parse_status = "failed"

@@ -15,6 +15,17 @@ class TestCase(BaseModel):
     rationale: str
     source_node_ids: list[int] = Field(default_factory=list)
 
+    @field_validator("steps", mode="before")
+    @classmethod
+    def _coerce_steps(cls, v):
+        # Models often emit a single prose string for steps instead of an
+        # array. Coerce to a one-element list rather than rejecting the whole
+        # generation -- this is normalization, not fabrication (the text is
+        # preserved verbatim). A non-string/non-list value still fails.
+        if isinstance(v, str):
+            return [v] if v.strip() else []
+        return v
+
 
 class TestCaseList(BaseModel):
     test_cases: list[TestCase]
