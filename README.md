@@ -71,3 +71,6 @@ GET    /generations/{id}                    (stale + diff summary if stale)
 ## Limitation
 
 Staleness is a **binary content-hash check**. A wording fix and a changed safety threshold both flip the same `stale` flag — the system does not judge *what kind* of change it was. See `docs/APPROACH.md`.
+
+---
+*Developed by Navaneetha.*
