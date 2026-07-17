@@ -55,10 +55,9 @@ def ingest_text(
     db.add(version)
     db.flush()
 
-    created_nodes = 0
-    for node in nodes:
-        match_or_create_node(db, doc.id, version.id, node)
-        created_nodes += 1
+    from app.versioning.matcher import persist_version
+
+    summary = persist_version(db, doc.id, version.id, nodes)
 
     db.commit()
     return {
@@ -66,40 +65,9 @@ def ingest_text(
         "version_number": version.id,
         "version_index": next_version,
         "source_filename": source_filename,
-        "node_count": created_nodes,
+        "node_count": len(summary["nodes"]),
+        "unchanged": summary["unchanged"],
+        "changed": summary["changed"],
+        "new": summary["new"],
         "warnings": [w.message for w in warnings],
     }
-
-
-def match_or_create_node(
-    db: Session, document_id: int, version_id: int, parsed
-) -> Node:
-    """Stage 2: always create a fresh logical node (correct for first ingest).
-
-    Stage 3 (FR2) replaces the body of this function with path-based matching
-    that reuses an existing Node.id when the same logical_key already exists,
-    creating a new NodeRevision under it and setting is_changed_from_previous.
-    """
-    node = Node(
-        document_id=document_id,
-        first_seen_version_id=version_id,
-        logical_key=parsed.logical_key,
-        heading_text=parsed.heading_text,
-        level=parsed.level,
-    )
-    db.add(node)
-    db.flush()
-    rev = NodeRevision(
-        node_id=node.id,
-        document_version_id=version_id,
-        parent_node_id=None,  # set below after we know parent ids
-        heading_text=parsed.heading_text,
-        level=parsed.level,
-        order_in_parent=parsed.order_in_parent,
-        body_text=parsed.body_text,
-        content_hash=content_hash(parsed.heading_text, parsed.body_text),
-        is_changed_from_previous=False,
-    )
-    db.add(rev)
-    db.flush()
-    return node
