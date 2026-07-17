@@ -50,19 +50,3 @@ def list_sections(
         )
         for r in revs
     ]
-
-
-@router.get("/{slug}/versions", response_model=list[int])
-def list_versions(slug: str, db: Session = Depends(get_db)) -> list[int]:
-    from app.db.models import DocumentVersion
-
-    doc = get_document_by_slug(db, slug)
-    if doc is None:
-        raise HTTPException(status_code=404, detail=f"document {slug!r} not found")
-    return [
-        v.version_number
-        for v in db.query(DocumentVersion)
-        .filter(DocumentVersion.document_id == doc.id)
-        .order_by(DocumentVersion.version_number)
-        .all()
-    ]

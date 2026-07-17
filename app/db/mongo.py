@@ -1,21 +1,14 @@
-"""Generation document store with a swappable backend.
+"""Generation document store (TRD section 3 + section 1 fallback).
 
-TRD section 3: generations live in MongoDB. Per TRD section 1, if
-MONGODB_URI is unset we fall back to a local JSON-file store behind the
-SAME interface, so the rest of the app never knows which backend is active.
-
-Robustness note (documented in APPROACH.md): we additionally fall back to the
-JSON store if a Mongo URI is configured but the cluster is unreachable at
-first use (e.g. the dev machine's IP is not in the Atlas Network Access
-allowlist). This keeps the full flow runnable for a reviewer without Atlas
-network access; it is one env flag (unsetting MONGODB_URI) away from
-strict Mongo-only behaviour.
+If MONGODB_URI is set, generations are stored in MongoDB. If it is unset,
+generations are stored in a local JSON file. The rest of the app talks to the
+same GenerationStore interface either way. This is the TRD-sanctioned simple
+fallback; for this build the JSON store is the default.
 """
 from __future__ import annotations
 
 import json
 import os
-import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,33 +29,26 @@ def _json_path() -> Path:
 
 
 class JsonGenerationStore:
-    """Process-local JSON-file store. Used when MONGODB_URI is unset or
-    unreachable. Persisted to disk so generations survive restarts."""
-
-    _lock = threading.Lock()
-
-    def __init__(self) -> None:
-        self._path = _json_path()
+    """Local JSON-file store used when MONGODB_URI is not set."""
 
     def _load(self) -> list[dict[str, Any]]:
-        if not self._path.exists():
+        if not _json_path().exists():
             return []
         try:
-            return json.loads(self._path.read_text(encoding="utf-8"))
+            return json.loads(_json_path().read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return []
 
     def _save(self, docs: list[dict[str, Any]]) -> None:
-        self._path.write_text(json.dumps(docs, default=str), encoding="utf-8")
+        _json_path().write_text(json.dumps(docs, default=str), encoding="utf-8")
 
     def put(self, doc: dict[str, Any]) -> str:
-        with self._lock:
-            docs = self._load()
-            gen_id = doc.get("_id") or str(uuid.uuid4())
-            doc["_id"] = gen_id
-            doc.setdefault("created_at", datetime.now(timezone.utc).isoformat())
-            docs.append(doc)
-            self._save(docs)
+        docs = self._load()
+        gen_id = doc.get("_id") or str(uuid.uuid4())
+        doc["_id"] = gen_id
+        doc.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+        docs.append(doc)
+        self._save(docs)
         return gen_id
 
     def get(self, gen_id: str) -> dict[str, Any] | None:
@@ -85,8 +71,7 @@ class JsonGenerationStore:
 
 
 class MongoGenerationStore:
-    """pymongo-backed store. Lazily connects; if the first operation cannot
-    reach the cluster, raises ConnectionError so the factory can fall back."""
+    """pymongo-backed store used when MONGODB_URI is set."""
 
     def __init__(self) -> None:
         uri = get_settings().mongodb_uri
@@ -97,14 +82,10 @@ class MongoGenerationStore:
         self._client = MongoClient(uri, serverSelectionTimeoutMS=5000)
         self._coll = self._client["ct200_qa"]["generations"]
 
-    def _ping(self) -> None:
-        self._client.admin.command("ping")
-
     def put(self, doc: dict[str, Any]) -> str:
         doc = dict(doc)
         doc.setdefault("created_at", datetime.now(timezone.utc))
-        result = self._coll.insert_one(doc)
-        return str(result.inserted_id)
+        return str(self._coll.insert_one(doc).inserted_id)
 
     def get(self, gen_id: str) -> dict[str, Any] | None:
         from bson import ObjectId
@@ -125,27 +106,12 @@ _store: GenerationStore | None = None
 
 
 def get_generation_store() -> GenerationStore:
-    """Factory: Mongo when configured AND reachable, else JSON file.
-
-    The choice is made once per process and cached. A failed Mongo ping logs
-    a clear message and falls back, so a reviewer without Atlas access still
-    gets the full flow (with provenance intact, just on disk instead of Mongo).
-    """
+    """Mongo when MONGODB_URI is set, else the JSON file store."""
     global _store
     if _store is not None:
         return _store
-    uri = get_settings().mongodb_uri
-    if uri:
-        try:
-            store = MongoGenerationStore()
-            store._ping()
-            print("[store] using MongoDB")
-            _store = store
-            return _store
-        except Exception as exc:  # noqa: BLE001
-            print(f"[store] MongoDB unreachable ({type(exc).__name__}); falling back to JSON store. "
-                  f"Add this machine's IP to the Atlas Network Access allowlist to use Mongo.")
+    if get_settings().mongodb_uri:
+        _store = MongoGenerationStore()
     else:
-        print("[store] MONGODB_URI not set; using JSON store")
-    _store = JsonGenerationStore()
+        _store = JsonGenerationStore()
     return _store
